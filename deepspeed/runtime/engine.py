@@ -20,7 +20,7 @@ from deepspeed.runtime.activation_checkpointing import checkpointing as activati
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.config import DeepSpeedConfig, \
-    ADAM_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, DEEPSPEED_ADAM, DEEPSPEED_OPTIMIZERS
+    ADAM_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, DEEPSPEED_ADAM, DEEPSPEED_OPTIMIZERS
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
@@ -466,7 +466,8 @@ class DeepSpeedEngine(Module):
             assert self.client_model_parameters, \
                 'DeepSpeed {} optimizer requires parameters in initialize() call'.format(self.optimizer_name())
 
-        if self.optimizer_name() == LAMB_OPTIMIZER:
+        if self.optimizer_name() == LAMB_OPTIMIZER or self.optimizer_name(
+        ) == ONEBIT_LAMB_OPTIMIZER:
             assert self.dynamic_loss_scale(), \
                 'DeepSpeed {} optimizer requires dynamic loss scaling'.format(self.optimizer_name())
 
@@ -560,6 +561,9 @@ class DeepSpeedEngine(Module):
         elif self.optimizer_name() == LAMB_OPTIMIZER:
             from deepspeed.ops.lamb import FusedLamb
             optimizer = FusedLamb(model_parameters, **optimizer_parameters)
+        elif self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER:
+            from deepspeed.ops.onebit_lamb import FusedOnebitLamb
+            optimizer = FusedOnebitLamb(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == ONEBIT_ADAM_OPTIMIZER:
             from deepspeed.runtime.fp16.onebit_adam import OnebitAdam
             optimizer = OnebitAdam(model_parameters, self, **optimizer_parameters)
@@ -604,7 +608,8 @@ class DeepSpeedEngine(Module):
                 dynamic_loss_args=dynamic_loss_args,
                 mpu=self.mpu,
                 clip_grad=clip_grad,
-                fused_lamb_legacy=self.optimizer_name() == LAMB_OPTIMIZER)
+                fused_lamb_legacy=(self.optimizer_name() == LAMB_OPTIMIZER
+                                   or self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER))
 
         return optimizer
 
