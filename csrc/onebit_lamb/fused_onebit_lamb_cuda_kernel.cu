@@ -259,6 +259,7 @@ __global__ void lamb_cuda_kernel_part3(
     const float b2,
     const float max_coeff,
     const float min_coeff,
+    const float lazy_lamb_coeff,
     const float eps,
     const float grad_scale,
     const float step_size,
@@ -303,7 +304,11 @@ __global__ void lamb_cuda_kernel_part3(
             denom = sqrtf(vj) + eps;
         T update = (mj / denom) + (decay * pj);
 
-        pj = pj - (step_size * lamb_coeff * update);
+        if (lazy_lamb_coeff > 0) {
+            pj = pj - (step_size * lazy_lamb_coeff * update);
+        } else {
+            pj = pj - (step_size * lamb_coeff * update);
+        }
         p[j] = pj;
         if (p_copy != NULL) p_copy[j] = (GRAD_T)pj;
     }
@@ -319,6 +324,7 @@ void fused_onebit_lamb_cuda(at::Tensor& p,
                             float beta2,
                             float max_coeff,
                             float min_coeff,
+                            float lazy_lamb_coeff,
                             float eps,
                             float grad_scale,
                             int step,
@@ -404,6 +410,7 @@ void fused_onebit_lamb_cuda(at::Tensor& p,
                         beta2,
                         max_coeff,
                         min_coeff,
+                        lazy_lamb_coeff,
                         eps,
                         grad_scale,
                         step_size,
@@ -451,6 +458,7 @@ void fused_onebit_lamb_cuda(at::Tensor& p,
                         beta2,
                         max_coeff,
                         min_coeff,
+                        lazy_lamb_coeff,
                         eps,
                         grad_scale,
                         step_size,

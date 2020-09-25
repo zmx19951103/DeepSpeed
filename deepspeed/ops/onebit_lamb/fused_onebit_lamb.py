@@ -47,6 +47,8 @@ class FusedOnebitLamb(torch.optim.Optimizer):
                  max_grad_norm=0.,
                  max_coeff=10.0,
                  min_coeff=0.01,
+                 freeze_step=900,
+                 update_window=100,
                  amsgrad=False):
         global fused_onebit_lamb_cuda
         try:
@@ -67,10 +69,14 @@ class FusedOnebitLamb(torch.optim.Optimizer):
                         weight_decay=weight_decay,
                         max_grad_norm=max_grad_norm,
                         max_coeff=max_coeff,
-                        min_coeff=min_coeff)
+                        min_coeff=min_coeff,
+                        freeze_step=freeze_step,
+                        update_window=update_window)
         super(FusedOnebitLamb, self).__init__(params, defaults)
         self.eps_mode = 0 if eps_inside_sqrt else 1
         self.lamb_coeffs = []
+        self.lazy_lamb_coeffs = []
+        self.accu_lamb_coeffs = []
 
     def step(self,
              closure=None,
@@ -121,6 +127,8 @@ class FusedOnebitLamb(torch.optim.Optimizer):
 
         #remove the previous coeffs
         del self.lamb_coeffs[:]
+
+        coeff_idx = 0
 
         for group, grads_this_group, output_params_this_group, grad_norm_group in zip(self.param_groups, grads_group, output_params_group, grad_norms):
             if grads_this_group is None:
@@ -174,23 +182,62 @@ class FusedOnebitLamb(torch.optim.Optimizer):
                 out_p = torch.tensor(
                     [],
                     dtype=torch.float) if output_param is None else output_param
-                lamb_coeff = fused_onebit_lamb_cuda.lamb(p.data,
-                                                         out_p,
-                                                         exp_avg,
-                                                         exp_avg_sq,
-                                                         grad,
-                                                         group['lr'],
-                                                         beta1,
-                                                         beta2,
-                                                         max_coeff,
-                                                         min_coeff,
-                                                         group['eps'],
-                                                         combined_scale,
-                                                         state['step'],
-                                                         self.eps_mode,
-                                                         bias_correction,
-                                                         group['weight_decay'])
-                self.lamb_coeffs.append(lamb_coeff)
+                # if state['step'] <= group['freeze_step'] or state['step'] % group['update_window'] == 0 or group['no_freeze']:
+                if group['no_freeze']:
+                    lamb_coeff = fused_onebit_lamb_cuda.lamb(p.data,
+                                                             out_p,
+                                                             exp_avg,
+                                                             exp_avg_sq,
+                                                             grad,
+                                                             group['lr'],
+                                                             beta1,
+                                                             beta2,
+                                                             max_coeff,
+                                                             min_coeff,
+                                                             -1.0,
+                                                             group['eps'],
+                                                             combined_scale,
+                                                             state['step'],
+                                                             self.eps_mode,
+                                                             bias_correction,
+                                                             group['weight_decay'])
+                    self.lamb_coeffs.append(lamb_coeff)
+                else:
+                    if state['step'] % group['update_window'] == 0:
+                        self.lazy_lamb_coeffs[coeff_idx] = self.accu_lamb_coeffs[
+                            coeff_idx] / float(group['update_window'])
+                        self.accu_lamb_coeffs[coeff_idx] = 0.0
+                    if state['step'] <= group['freeze_step'] or len(
+                            self.lazy_lamb_coeffs) < coeff_idx + 1:
+                        lamb_coeffs_signal = -1
+                    else:
+                        lamb_coeffs_signal = self.lazy_lamb_coeffs[coeff_idx]
+                    lamb_coeff = fused_onebit_lamb_cuda.lamb(p.data,
+                                                             out_p,
+                                                             exp_avg,
+                                                             exp_avg_sq,
+                                                             grad,
+                                                             group['lr'],
+                                                             beta1,
+                                                             beta2,
+                                                             max_coeff,
+                                                             min_coeff,
+                                                             lamb_coeffs_signal,
+                                                             group['eps'],
+                                                             combined_scale,
+                                                             state['step'],
+                                                             self.eps_mode,
+                                                             bias_correction,
+                                                             group['weight_decay'])
+                    if lamb_coeffs_signal < 0:
+                        self.lamb_coeffs.append(lamb_coeff)
+                    else:
+                        self.lamb_coeffs.append(lamb_coeffs_signal)
+                    if len(self.accu_lamb_coeffs) < coeff_idx + 1:
+                        self.accu_lamb_coeffs.append(lamb_coeff)
+                    else:
+                        self.accu_lamb_coeffs[coeff_idx] += lamb_coeff
+                coeff_idx += 1
         return loss
 
     def get_lamb_coeffs(self):
