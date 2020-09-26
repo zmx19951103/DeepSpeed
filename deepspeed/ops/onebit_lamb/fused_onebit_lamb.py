@@ -75,8 +75,8 @@ class FusedOnebitLamb(torch.optim.Optimizer):
         super(FusedOnebitLamb, self).__init__(params, defaults)
         self.eps_mode = 0 if eps_inside_sqrt else 1
         self.lamb_coeffs = []
-        self.lazy_lamb_coeffs = []
-        self.accu_lamb_coeffs = []
+        self.lazy_lamb_coeffs = {}
+        self.accu_lamb_coeffs = {}
 
     def step(self,
              closure=None,
@@ -207,8 +207,8 @@ class FusedOnebitLamb(torch.optim.Optimizer):
                         self.lazy_lamb_coeffs[coeff_idx] = self.accu_lamb_coeffs[
                             coeff_idx] / float(group['update_window'])
                         self.accu_lamb_coeffs[coeff_idx] = 0.0
-                    if state['step'] <= group['freeze_step'] or len(
-                            self.lazy_lamb_coeffs) < coeff_idx + 1:
+                    if state['step'] <= group[
+                            'freeze_step'] or coeff_idx not in self.lazy_lamb_coeffs:
                         lamb_coeffs_signal = -1
                     else:
                         lamb_coeffs_signal = self.lazy_lamb_coeffs[coeff_idx]
@@ -233,8 +233,8 @@ class FusedOnebitLamb(torch.optim.Optimizer):
                         self.lamb_coeffs.append(lamb_coeff)
                     else:
                         self.lamb_coeffs.append(lamb_coeffs_signal)
-                    if len(self.accu_lamb_coeffs) < coeff_idx + 1:
-                        self.accu_lamb_coeffs.append(lamb_coeff)
+                    if coeff_idx not in self.accu_lamb_coeffs:
+                        self.accu_lamb_coeffs[coeff_idx] = lamb_coeff
                     else:
                         self.accu_lamb_coeffs[coeff_idx] += lamb_coeff
                 coeff_idx += 1
