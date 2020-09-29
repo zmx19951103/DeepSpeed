@@ -203,7 +203,8 @@ class FusedOnebitLamb(torch.optim.Optimizer):
                                                              group['weight_decay'])
                     self.lamb_coeffs.append(lamb_coeff)
                 else:
-                    if state['step'] % group['update_window'] == 0:
+                    if state['step'] % group[
+                            'update_window'] == 0 and coeff_idx in self.accu_lamb_coeffs:
                         self.lazy_lamb_coeffs[coeff_idx] = self.accu_lamb_coeffs[
                             coeff_idx] / float(group['update_window'])
                         self.accu_lamb_coeffs[coeff_idx] = 0.0
