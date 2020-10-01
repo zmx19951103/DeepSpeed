@@ -20,7 +20,7 @@ from deepspeed.runtime.activation_checkpointing import checkpointing as activati
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.config import DeepSpeedConfig, \
-    ADAM_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, DEEPSPEED_ADAM, DEEPSPEED_OPTIMIZERS
+    ADAM_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER_SIMULATE, ONEBIT_ADAM_OPTIMIZER, DEEPSPEED_ADAM, DEEPSPEED_OPTIMIZERS
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
@@ -564,6 +564,11 @@ class DeepSpeedEngine(Module):
         elif self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER:
             from deepspeed.ops.onebit_lamb import FusedOnebitLamb
             optimizer = FusedOnebitLamb(model_parameters, **optimizer_parameters)
+        elif self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER_SIMULATE:
+            from deepspeed.runtime.fp16.onebit_lamb_simulate import OnebitLambSimulate
+            optimizer = OnebitLambSimulate(model_parameters,
+                                           self,
+                                           **optimizer_parameters)
         elif self.optimizer_name() == ONEBIT_ADAM_OPTIMIZER:
             from deepspeed.runtime.fp16.onebit_adam import OnebitAdam
             optimizer = OnebitAdam(model_parameters, self, **optimizer_parameters)
@@ -578,7 +583,8 @@ class DeepSpeedEngine(Module):
         clip_grad = self.gradient_clipping()
         if isinstance(optimizer,
                       apex.optimizers.FusedAdam) or self.optimizer_name(
-                      ) == ONEBIT_ADAM_OPTIMIZER:
+                      ) == ONEBIT_ADAM_OPTIMIZER or self.optimizer_name(
+                      ) == ONEBIT_LAMB_OPTIMIZER_SIMULATE:
             if self.dynamic_loss_scale():
                 logger.info('Creating fp16 optimizer with dynamic loss scale')
                 timers = self.timers if self.wall_clock_breakdown() else None
