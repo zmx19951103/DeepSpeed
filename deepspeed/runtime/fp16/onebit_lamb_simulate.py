@@ -59,7 +59,13 @@ class OnebitLambSimulate(torch.optim.Optimizer):
                  min_coeff=0.01,
                  amsgrad=False,
                  threshold=0.001,
-                 update_window=1):
+                 coeff_beta=0.99,
+                 compress_mode=0,
+                 ratio_max=2.5,
+                 ratio_min=0.5,
+                 ratio_threshold=0.1,
+                 linear_step=1000,
+                 extra_stats=0):
 
         if amsgrad:
             raise RuntimeError('FusedLamb does not support the AMSGrad variant.')
@@ -74,7 +80,13 @@ class OnebitLambSimulate(torch.optim.Optimizer):
         super(OnebitLambSimulate, self).__init__(params, defaults)
         self.eps_mode = 0 if eps_inside_sqrt else 1
         self.freeze_step = int(freeze_step)
-        self.update_window = int(update_window)
+        self.coeff_beta = coeff_beta
+        self.compress_mode = int(compress_mode)
+        self.ratio_max = ratio_max
+        self.ratio_min = ratio_min
+        self.ratio_threshold = ratio_threshold
+        self.linear_step = int(linear_step)
+        self.extra_stats = int(extra_stats)
 
         self.comm_time = 0.0
         self.step_time = 0.0
@@ -84,12 +96,16 @@ class OnebitLambSimulate(torch.optim.Optimizer):
         self.adam_freeze_key = False
         self.threshold = threshold
         self.initialize = False
-        # self.freeze_step = freeze_step
+
         self.lamb_coeffs = []
-        self.last_local_lamb_coeffs = {}
-        self.last_lamb_coeffs = {}
-        self.lazy_lamb_coeffs = {}
-        self.accu_lamb_coeffs = {}
+        self.weight_norms = []
+        self.update_norms = []
+        self.momentum_norms = []
+        self.variance_norms = []
+        self.error_worker_norms = []
+        self.error_server_norms = []
+        self.raw_ratios = []
+        self.ratios = []
 
     def tenary_compress(self, buffer_m, error):
         buffer_m.add_(error)
@@ -137,7 +153,14 @@ class OnebitLambSimulate(torch.optim.Optimizer):
 
         #remove the previous coeffs
         del self.lamb_coeffs[:]
-        p_idx = 0
+        del self.weight_norms[:]
+        del self.update_norms[:]
+        del self.momentum_norms[:]
+        del self.variance_norms[:]
+        del self.error_worker_norms[:]
+        del self.error_server_norms[:]
+        del self.raw_ratios[:]
+        del self.ratios[:]
 
         for group, grads_this_group, grad_norm_group in zip(self.param_groups, grads_group, grad_norms):
             if grads_this_group is None:
@@ -173,25 +196,30 @@ class OnebitLambSimulate(torch.optim.Optimizer):
                 # State initialization
                 if len(state) == 0:
                     state['step'] = 0
+                    state['lamb_coeff_freeze'] = 0.0
+                    state['last_ratio'] = 1.0
                     # Exponential moving average of gradient values
                     state['exp_avg'] = torch.zeros_like(p.data)
                     # Exponential moving average of squared gradient values
                     state['exp_avg_sq'] = torch.zeros_like(p.data)
                     state['worker_error'] = torch.zeros_like(p.data)
                     state['server_error'] = torch.zeros_like(p.data)
-                    state['last_worker_error'] = torch.zeros_like(p.data)
-                    state['last_server_error'] = torch.zeros_like(p.data)
+                    if self.compress_mode == 0:
+                        state['exp_avg_sq_back'] = torch.zeros_like(p.data)
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
                 beta1, beta2 = group['betas']
                 max_coeff = group['max_coeff']
                 min_coeff = group['min_coeff']
+                if self.compress_mode == 0:
+                    exp_avg_sq_back = state['exp_avg_sq_back']
 
                 grad = grad / combined_scale
 
                 state['step'] += 1
+                # weight_norm = torch.norm(p.data)
                 weight_norm = p.data.pow(2).sum().sqrt()
-                # weight_norm = p.data.pow(2).sum().sqrt().clamp(0, 10)
+                self.weight_norms.append(weight_norm.item())
 
                 # logger.info('I am Here')
                 if self.adam_freeze_key is False:
@@ -200,45 +228,15 @@ class OnebitLambSimulate(torch.optim.Optimizer):
                     # v_diff_buffer += v_diff.norm() / exp_avg_sq.norm() / state['tensor_size']
                     # exp_avg_sq.add_(v_diff).addcmul_(1 - beta2, grad, grad)
                     exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+                    if self.compress_mode == 0 and state['step'] == self.freeze_step:
+                        exp_avg_sq_back.data = exp_avg_sq.clone()
                     grad = None
                     # v_diff = None
-
                 else:
+                    if self.compress_mode == 0:
+                        exp_avg_back = torch.zeros_like(p.data)
+                        exp_avg_back.data = exp_avg.clone()
                     exp_avg.mul_(beta1).add_(1 - beta1, grad)
-
-                    # local_update = exp_avg / (exp_avg_sq.sqrt() + group['eps'])
-                    # if group['weight_decay'] > 0.0:
-                    #     local_update += group['weight_decay'] * p.data
-                    # local_update_norm = local_update.pow(2).sum().sqrt()
-                    # local_lamb_coeff = 1.0
-                    # if weight_norm != 0 and local_update_norm != 0:
-                    #     local_lamb_coeff = (weight_norm / local_update_norm).item()
-                    #     if local_lamb_coeff > max_coeff:
-                    #         local_lamb_coeff = max_coeff
-                    #     if local_lamb_coeff < min_coeff:
-                    #         local_lamb_coeff = min_coeff
-                    # if p_idx in self.last_local_lamb_coeffs:
-                    #     state['worker_error'] = state['worker_error'] * self.last_local_lamb_coeffs[p_idx] / local_lamb_coeff
-                    #     state['server_error'] = state['server_error'] * self.last_local_lamb_coeffs[p_idx] / local_lamb_coeff
-                    # self.last_local_lamb_coeffs[p_idx] = local_lamb_coeff
-
-                    # if state['step'] % self.update_window == 0 and p_idx in self.accu_lamb_coeffs:
-                    #     new_lamb_coeff = 1.0
-                    #     if weight_norm != 0 and self.accu_lamb_coeffs[p_idx] != 0:
-                    #         new_lamb_coeff = (weight_norm / self.accu_lamb_coeffs[p_idx]).item() * self.update_window
-                    #     if new_lamb_coeff > max_coeff:
-                    #         new_lamb_coeff = max_coeff
-                    #     if new_lamb_coeff < min_coeff:
-                    #         new_lamb_coeff = min_coeff
-                    #     if p_idx in self.lazy_lamb_coeffs:
-                    #         state['worker_error'] = state['worker_error'] * self.lazy_lamb_coeffs[p_idx] / new_lamb_coeff
-                    #         state['server_error'] = state['server_error'] * self.lazy_lamb_coeffs[p_idx] / new_lamb_coeff
-                    #     self.lazy_lamb_coeffs[p_idx] = new_lamb_coeff
-                    #     self.accu_lamb_coeffs[p_idx] = 0.0
-
-                    # state['last_worker_error'].data = state['worker_error'].clone()
-                    # state['last_server_error'].data = state['server_error'].clone()
-
                     worker_error = state['worker_error']
                     server_error = state['server_error']
                     grad = None
@@ -246,46 +244,75 @@ class OnebitLambSimulate(torch.optim.Optimizer):
                     dist.all_reduce(exp_avg)
                     exp_avg.mul_(1 / dist.get_world_size())
                     self.tenary_compress(exp_avg, server_error)
+                    if self.extra_stats == 1:
+                        self.error_worker_norms.append(torch.norm(worker_error).item())
+                        self.error_server_norms.append(torch.norm(server_error).item())
+                    if self.compress_mode == 0:
+                        grad_recover = (exp_avg - exp_avg_back * beta1) / (1 - beta1)
+                        exp_avg_sq_back.mul_(beta2).addcmul_(1 - beta2,
+                                                             grad_recover,
+                                                             grad_recover)
 
-                update = exp_avg / (exp_avg_sq.sqrt() + group['eps'])
+                if self.extra_stats == 1:
+                    self.momentum_norms.append(torch.norm(exp_avg).item())
+                    if self.adam_freeze_key and self.compress_mode == 0:
+                        self.variance_norms.append(torch.norm(exp_avg_sq_back).item())
+                    else:
+                        self.variance_norms.append(torch.norm(exp_avg_sq).item())
+                denom = exp_avg_sq.sqrt() + group['eps']
+                update_prelim = exp_avg / denom
 
                 if group['weight_decay'] > 0.0:
-                    update += group['weight_decay'] * p.data
-
+                    update = update_prelim + group['weight_decay'] * p.data
+                else:
+                    update = update_prelim
+                # update_norm = torch.norm(update)
                 update_norm = update.pow(2).sum().sqrt()
-
-                # if self.adam_freeze_key:
-                #     if p_idx not in self.accu_lamb_coeffs:
-                #         self.accu_lamb_coeffs[p_idx] = update_norm
-                #     else:
-                #         self.accu_lamb_coeffs[p_idx] += update_norm
-                # if self.adam_freeze_key is False or p_idx not in self.lazy_lamb_coeffs:
-                #     lamb_coeff = 1.0
-                #     if weight_norm != 0 and update_norm != 0:
-                #         lamb_coeff = (weight_norm / update_norm).item()
-                #         if lamb_coeff > max_coeff:
-                #             lamb_coeff = max_coeff
-                #         if lamb_coeff < min_coeff:
-                #             lamb_coeff = min_coeff
-                # else:
-                #     lamb_coeff = self.lazy_lamb_coeffs[p_idx]
+                self.update_norms.append(update_norm.item())
 
                 lamb_coeff = 1.0
-                if weight_norm != 0 and update_norm != 0:
-                    lamb_coeff = (weight_norm / update_norm).item()
-                    if lamb_coeff > max_coeff:
-                        lamb_coeff = max_coeff
-                    if lamb_coeff < min_coeff:
-                        lamb_coeff = min_coeff
-
+                if self.adam_freeze_key:
+                    if self.compress_mode == 0:
+                        denom_real = exp_avg_sq_back.sqrt() + group['eps']
+                        ratio = (denom / denom_real).max().item()
+                        if group['weight_decay'] > 0.0:
+                            # update_ratio = (torch.norm(update_prelim) / update_norm).item()
+                            update_ratio = (update_prelim.pow(2).sum().sqrt() /
+                                            update_norm).item()
+                            update_ratio = min(1.0, update_ratio)
+                            ratio = ratio * update_ratio + (1.0 - update_ratio)
+                        self.raw_ratios.append(ratio)
+                        if ratio > self.ratio_max:
+                            ratio = self.ratio_max
+                        if ratio < self.ratio_min:
+                            ratio = self.ratio_min
+                        if ratio > state['last_ratio'] * (1.0 + self.ratio_threshold):
+                            ratio = state['last_ratio'] * (1.0 + self.ratio_threshold)
+                        if ratio < state['last_ratio'] * (1.0 - self.ratio_threshold):
+                            ratio = state['last_ratio'] * (1.0 - self.ratio_threshold)
+                        state['last_ratio'] = ratio
+                        self.ratios.append(ratio)
+                        lamb_coeff = state['lamb_coeff_freeze'] * ratio
+                    else:
+                        ratio = min(
+                            1.0,
+                            float(state['step'] - self.freeze_step) /
+                            (self.linear_step - self.freeze_step))
+                        factor = 1.0 + self.ratio_max * ratio
+                        lamb_coeff = state['lamb_coeff_freeze'] * factor
+                else:
+                    if weight_norm != 0 and update_norm != 0:
+                        lamb_coeff = (weight_norm / update_norm).item()
+                        if lamb_coeff > max_coeff:
+                            lamb_coeff = max_coeff
+                        if lamb_coeff < min_coeff:
+                            lamb_coeff = min_coeff
+                    if lamb_coeff != 1.0:
+                        state['lamb_coeff_freeze'] = self.coeff_beta * state[
+                            'lamb_coeff_freeze'] + (1 - self.coeff_beta) * lamb_coeff
                 self.lamb_coeffs.append(lamb_coeff)
                 with torch.no_grad():
                     p.add_(-group['lr'] * lamb_coeff * update)
-                # if self.adam_freeze_key and p_idx in self.last_lamb_coeffs:
-                #     state['worker_error'] += (self.last_lamb_coeffs[p_idx]/lamb_coeff - 1) * state['last_worker_error']
-                #     state['server_error'] += (self.last_lamb_coeffs[p_idx]/lamb_coeff - 1) * state['last_server_error']
-                # self.last_lamb_coeffs[p_idx] = lamb_coeff
-                p_idx += 1
 
         if self.adam_freeze_key is False:
             if state['step'] >= self.freeze_step:
@@ -295,6 +322,4 @@ class OnebitLambSimulate(torch.optim.Optimizer):
         return loss
 
     def get_lamb_coeffs(self):
-        # lamb_coeffs = [lamb_coeff.item() for lamb_coeff in self.lamb_coeffs]
-        # return lamb_coeffs
-        return self.lamb_coeffs
+        return self.lamb_coeffs, self.weight_norms, self.update_norms, self.momentum_norms, self.variance_norms, self.error_worker_norms, self.error_server_norms, self.raw_ratios, self.ratios
