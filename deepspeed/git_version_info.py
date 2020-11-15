@@ -8,7 +8,6 @@ except ModuleNotFoundError:
     git_branch = '[none]'
     installed_ops = {
         'lamb': False,
-        'onebit_lamb': False,
         'transformer': False,
         'sparse-attn': False,
         'cpu-adam': False

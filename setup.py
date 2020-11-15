@@ -137,21 +137,6 @@ if BUILD_MASK & DS_BUILD_LAMB:
                           'nvcc': ['-O3',
                                    '--use_fast_math'] + version_dependent_macros
                       }))
-    ## 1-bit Lamb ##
-    ext_modules.append(
-        CUDAExtension(name='deepspeed.ops.onebit_lamb.fused_onebit_lamb_cuda',
-                      sources=[
-                          'csrc/onebit_lamb/fused_onebit_lamb_cuda.cpp',
-                          'csrc/onebit_lamb/fused_onebit_lamb_cuda_kernel.cu'
-                      ],
-                      include_dirs=['csrc/includes'],
-                      extra_compile_args={
-                          'cxx': [
-                              '-O3',
-                          ] + version_dependent_macros,
-                          'nvcc': ['-O3',
-                                   '--use_fast_math'] + version_dependent_macros
-                      }))
 
 ## Adam ##
 if BUILD_MASK & DS_BUILD_CPU_ADAM:
