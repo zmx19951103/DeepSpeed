@@ -562,8 +562,8 @@ class DeepSpeedEngine(Module):
             from deepspeed.ops.lamb import FusedLamb
             optimizer = FusedLamb(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER:
-            from deepspeed.ops.onebit_lamb import FusedOnebitLamb
-            optimizer = FusedOnebitLamb(model_parameters, **optimizer_parameters)
+            from deepspeed.runtime.fp16.onebit_lamb import OnebitLamb
+            optimizer = OnebitLamb(model_parameters, self, **optimizer_parameters)
         elif self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER_SIMULATE:
             from deepspeed.runtime.fp16.onebit_lamb_simulate import OnebitLambSimulate
             optimizer = OnebitLambSimulate(model_parameters,
@@ -613,8 +613,7 @@ class DeepSpeedEngine(Module):
                 dynamic_loss_args=dynamic_loss_args,
                 mpu=self.mpu,
                 clip_grad=clip_grad,
-                fused_lamb_legacy=(self.optimizer_name() == LAMB_OPTIMIZER
-                                   or self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER))
+                fused_lamb_legacy=(self.optimizer_name() == LAMB_OPTIMIZER))
 
         return optimizer
 
